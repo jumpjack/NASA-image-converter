@@ -5,14 +5,14 @@ Convert .IMG, .RGB and .SGI (*) ancient image formats into modern  PNG
 - No command prompt.
 - No python.
 - No compilation.
-- No setup-
+- No setup.
 - No linux-only
 - No closed source.
 - No download.
 - No libraries.
 - No dependencies.
 
-Just load your IMG in the browser and "magically" convert it into PNG on any machine.
+Just load your IMG/RGB/SGI in the browser and "magically" convert it into PNG on any machine.
 
 
 - [Official NASA IMN2PNG converter (no source code)](https://bjj.mmedia.is/utils/img2png/) (command line)
