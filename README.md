@@ -17,7 +17,8 @@ Just load your IMG/RGB/SGI in the browser and "magically" convert it into PNG on
 
 - [Official NASA IMN2PNG converter (no source code)](https://bjj.mmedia.is/utils/img2png/) (command line)
 - [With Photoshop](https://www.planetary.org/articles/0307-image-processing-trick-raw-photoshop)
-- [other NASA software](https://pds-imaging.jpl.nasa.gov/software/)
+- [Other NASA software](https://pds-imaging.jpl.nasa.gov/software/)
+- [Some more software from NASA](https://pds.nasa.gov/tools/tool-registry/)
 
 
 (*) Format by Silicon Graphics Inc.
