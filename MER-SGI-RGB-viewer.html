@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SGI & VICAR Viewer — updated (VICAR @ 0x6800)</title>
+<style>
+  :root{--bg:#f7f8fb;--card:#fff;--muted:#666}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:18px;background:var(--bg);color:#111}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  h1{margin:0;font-size:20px}
+  .drop{border:2px dashed #bbb;padding:18px;border-radius:8px;text-align:center;margin-top:12px;background:linear-gradient(180deg,transparent,rgba(255,255,255,0.4))}
+  .files{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+  .thumb{background:var(--card);border:1px solid #e1e4ea;padding:8px;border-radius:8px;width:220px;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
+  .thumb canvas{display:block;border-radius:4px;border:1px solid #e7e9ee;background:#fff}
+  .meta{font-size:13px;color:var(--muted);margin-top:8px;min-height:44px}
+  .controls{display:flex;gap:6px;margin-top:8px}
+  button{border:1px solid #cfd6e3;background:#fff;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}
+  .floating-meta{position:fixed;right:18px;top:18px;width:420px;max-height:80vh;overflow:auto;background:var(--card);border:1px solid #d7dbe6;border-radius:8px;padding:12px;box-shadow:0 10px 30px rgba(10,20,40,0.08);display:none;z-index:999}
+  .floating-meta h3{margin:0 0 6px 0;font-size:16px}
+  .floating-meta pre{white-space:pre-wrap;background:#f6f8fb;padding:8px;border-radius:6px;border:1px solid #eef2f7;overflow:auto}
+  .band-select{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+  .small{font-size:13px;color:var(--muted)}
+  .hint{font-size:13px;color:var(--muted);margin-top:6px}
+</style>
+</head>
+<body>
+  <header>
+    <h1>SGI & VICAR Viewer</h1>
+    <div class="hint">Carica <code>.rgb</code> (SGI IRIS non compressi) o <code>.img</code> (VICAR/PDS). Clicca sull'anteprima per il riquadro metadati.</div>
+  </header>
+
+  <input id="fileinp" type="file" multiple style="margin-top:6px" />
+  <div id="drop" class="drop">Trascina qui i file oppure clicca per selezionarli</div>
+
+  <div id="files" class="files" aria-live="polite"></div>
+
+  <div id="floatingMeta" class="floating-meta" role="dialog" aria-hidden="true">
+    <button id="closeMeta" style="float:right">Chiudi</button>
+    <h3 id="metaTitle">Metadati</h3>
+    <div id="metaFields" class="small"></div>
+    <div id="metaRawLabel" style="margin-top:8px;">
+      <strong>Label VICAR (testo):</strong>
+      <pre id="rawLabel"></pre>
+    </div>
+    <div id="bandChooser" class="band-select"></div>
+  </div>
+
+<script>
+/* ---------- DOM refs ---------- */
+const fileinp = document.getElementById('fileinp');
+const drop = document.getElementById('drop');
+const filesDiv = document.getElementById('files');
+const floatingMeta = document.getElementById('floatingMeta');
+const rawLabel = document.getElementById('rawLabel');
+const metaFields = document.getElementById('metaFields');
+const metaTitle = document.getElementById('metaTitle');
+const bandChooser = document.getElementById('bandChooser');
+const closeMeta = document.getElementById('closeMeta');
+
+drop.addEventListener('click', () => fileinp.click());
+drop.addEventListener('dragover', ev => { ev.preventDefault(); drop.style.borderColor = '#888'; });
+drop.addEventListener('dragleave', ev => { drop.style.borderColor = '#bbb'; });
+drop.addEventListener('drop', ev => { ev.preventDefault(); drop.style.borderColor = '#bbb'; handleFiles(ev.dataTransfer.files); });
+fileinp.addEventListener('change', ev => handleFiles(ev.target.files));
+closeMeta.addEventListener('click', ()=> { floatingMeta.style.display='none'; floatingMeta.setAttribute('aria-hidden','true'); });
+
+/* ---------- Main ---------- */
+function handleFiles(list){
+  filesDiv.innerHTML = '';
+  Array.from(list).forEach(f => processFile(f));
+}
+
+async function processFile(file){
+  const name = file.name;
+  const card = makeCard();
+  const canvasEl = card.querySelector('canvas');
+  const metaEl = card.querySelector('.meta');
+  filesDiv.appendChild(card);
+
+  let arrayBuffer;
+  try {
+    arrayBuffer = await file.arrayBuffer();
+  } catch(e){
+    metaEl.textContent = 'Impossibile leggere il file';
+    return;
+  }
+
+  try {
+    // SGI check
+    if (arrayBuffer.byteLength >= 2) {
+      const dv = new DataView(arrayBuffer);
+      const magic = dv.getUint16(0, false);
+      if (magic === 0x01DA) {
+        const result = decodeSGI(arrayBuffer);
+        drawToCanvas(result.canvas, canvasEl);
+        metaEl.innerHTML = `<strong>${escapeHtml(name)}</strong><br>${result.meta.xsize}×${result.meta.ysize} — canali: ${result.meta.zsize}`;
+        attachButtons(card, result.canvas, file, result.meta, name);
+        canvasEl.addEventListener('click', ()=> showMetaForSGI(name, result.meta));
+        return;
+      }
+    }
+
+    // VICAR: first try at offset 0x6800 (26624)
+    const VICAR_OFFSET = 0x6800; // user-specified common offset
+    if (arrayBuffer.byteLength > VICAR_OFFSET + 8) {
+      try {
+        const result = parseVICARIMG(arrayBuffer, VICAR_OFFSET);
+        drawToCanvas(result.canvas, canvasEl);
+        metaEl.innerHTML = `<strong>${escapeHtml(name)}</strong><br>${result.meta.NS}×${result.meta.NL} — bande: ${result.meta.NB} — format: ${result.meta.FORMAT}`;
+        attachButtons(card, result.canvas, file, result.meta, name);
+        canvasEl.addEventListener('click', ()=> showMetaForVICAR(name, result));
+        return;
+      } catch(e){
+        // don't fail here — we'll fallback to generic search
+        console.warn('No VICAR at 0x6800 or parse failed:', e && e.message ? e.message : e);
+      }
+    }
+
+    // fallback: search for LBLSIZE anywhere near start (old behavior)
+    const headText = new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(0, 16384)));
+    if (/LBLSIZE\\s*=\\s*\\d+/i.test(headText)) {
+      const result = parseVICARIMG(arrayBuffer, 0);
+      drawToCanvas(result.canvas, canvasEl);
+      metaEl.innerHTML = `<strong>${escapeHtml(name)}</strong><br>${result.meta.NS}×${result.meta.NL} — bande: ${result.meta.NB} — format: ${result.meta.FORMAT}`;
+      attachButtons(card, result.canvas, file, result.meta, name);
+      canvasEl.addEventListener('click', ()=> showMetaForVICAR(name, result));
+      return;
+    }
+
+    // final fallback: maybe SGI stripped header - try SGI decode
+    try {
+      const result = decodeSGI(arrayBuffer);
+      drawToCanvas(result.canvas, canvasEl);
+      metaEl.innerHTML = `<strong>${escapeHtml(name)}</strong><br>${result.meta.xsize}×${result.meta.ysize} — canali: ${result.meta.zsize}`;
+      attachButtons(card, result.canvas, file, result.meta, name);
+      canvasEl.addEventListener('click', ()=> showMetaForSGI(name, result.meta));
+      return;
+    } catch(e) {
+      // give a helpful message
+      metaEl.textContent = `${escapeHtml(name)} — ${arrayBuffer.byteLength} bytes — formato non riconosciuto (VICAR non trovato a 0x6800, né LBLSIZE iniziale, né SGI)`;
+    }
+  } catch(err){
+    metaEl.textContent = 'Errore: ' + (err && err.message ? err.message : String(err));
+    console.error(err);
+  }
+}
+
+/* ---------- Helpers: card & buttons ---------- */
+function makeCard(){
+  const div = document.createElement('div');
+  div.className = 'thumb';
+  div.innerHTML = `<canvas width="256" height="256"></canvas><div class="meta">Processing…</div>
+    <div class="controls"><button class="view">Apri</button><button class="download">Scarica PNG</button></div>`;
+  return div;
+}
+
+function attachButtons(card, canvas, originalFile, meta, filename){
+  const viewBtn = card.querySelector('.view');
+  const dlBtn = card.querySelector('.download');
+
+  viewBtn.addEventListener('click', ()=>{
+    const w = window.open('', '_blank');
+    w.document.title = filename;
+    const img = w.document.createElement('img');
+    img.src = canvas.toDataURL('image/png');
+    img.style.maxWidth = '100%';
+    w.document.body.style.margin = '0';
+    w.document.body.appendChild(img);
+  });
+
+  dlBtn.addEventListener('click', ()=>{
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = filename.replace(/\\.[^.]+$/, '') + '.png';
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+}
+
+/* ---------- Draw helper ---------- */
+function drawToCanvas(srcCanvas, destCanvas){
+  const ctx = destCanvas.getContext('2d');
+  ctx.clearRect(0,0,destCanvas.width,destCanvas.height);
+  const scale = Math.min(destCanvas.width/srcCanvas.width, destCanvas.height/srcCanvas.height);
+  const w = Math.round(srcCanvas.width * scale);
+  const h = Math.round(srcCanvas.height * scale);
+  ctx.drawImage(srcCanvas, 0, 0, srcCanvas.width, srcCanvas.height, Math.floor((destCanvas.width-w)/2), Math.floor((destCanvas.height-h)/2), w, h);
+}
+
+/* ---------- SGI decoder (unchanged) ---------- */
+function decodeSGI(arrayBuffer){
+  const dv = new DataView(arrayBuffer);
+  if (dv.byteLength < 512) throw new Error('Header mancante o file troppo corto');
+  const magic = dv.getUint16(0, false);
+  if (magic !== 0x01DA) throw new Error('Magic diverso: non sembra un file IRIS RGB');
+  const storage = dv.getUint8(2);
+  const bpc = dv.getUint8(3);
+  const xsize = dv.getUint16(6, false);
+  const ysize = dv.getUint16(8, false);
+  const zsize = dv.getUint16(10, false);
+
+  if (storage === 1) throw new Error('RLE (storage=1) non supportato');
+  if (bpc !== 1) throw new Error('Solo 8-bit per canale (bpc=1) supportati');
+  if (xsize === 0 || ysize === 0) throw new Error('Dimensioni non valide');
+
+  const headerSize = 512;
+  const expected = xsize * ysize * zsize;
+  const available = dv.byteLength - headerSize;
+  if (available < expected) throw new Error(`Dati immagine incompleti: attesi ${expected} byte, trovati ${available}`);
+
+  const data = new Uint8Array(arrayBuffer, headerSize);
+  const canvas = document.createElement('canvas');
+  canvas.width = xsize; canvas.height = ysize;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(xsize, ysize);
+  const out = img.data;
+
+  if (zsize === 1){
+    for (let y=0;y<ysize;y++){
+      const rowOff = y * xsize;
+      for (let x=0;x<xsize;x++){
+        const v = data[rowOff + x];
+        const i = (y*xsize + x)*4;
+        out[i]=v; out[i+1]=v; out[i+2]=v; out[i+3]=255;
+      }
+    }
+  } else if (zsize >= 3){
+    const planeSize = xsize * ysize;
+    for (let c=0;c<3;c++){
+      const planeOff = c * planeSize;
+      for (let y=0;y<ysize;y++){
+        const rowOff = y * xsize;
+        for (let x=0;x<xsize;x++){
+          const v = data[planeOff + rowOff + x];
+          const i = (y*xsize + x)*4;
+          out[i + c] = v;
+          if (c === 2) out[i+3] = 255;
+        }
+      }
+    }
+  } else {
+    throw new Error('zsize non gestito: ' + zsize);
+  }
+  ctx.putImageData(img,0,0);
+  return { canvas, meta: { xsize, ysize, zsize, bpc, storage } };
+}
+
+/* ---------- VICAR/PDS parser & decoder (search at given offset) ---------- */
+function parseVICARIMG(arrayBuffer, preferOffset=0){
+  // preferOffset: if >0, try to parse VICAR label starting at that exact offset
+  const BYTE_ORDER_IS_BIG_ENDIAN = true;
+  const MAX_LABEL_BYTES = Math.min(1<<20, arrayBuffer.byteLength); // up to 1MB label guard
+
+  function tryParseAt(offset){
+    if (offset < 0 || offset >= arrayBuffer.byteLength) throw new Error('Offset label non valido');
+    const avail = Math.min(MAX_LABEL_BYTES, arrayBuffer.byteLength - offset);
+    const labelBytes = new Uint8Array(arrayBuffer.slice(offset, offset + avail));
+    const labelText = new TextDecoder().decode(labelBytes);
+    const lblMatch = labelText.match(/LBLSIZE\s*=\s*(\d+)/i);
+    if (!lblMatch) return null;
+    const lblSize = parseInt(lblMatch[1],10);
+    if (isNaN(lblSize) || lblSize <= 0) return null;
+    if (offset + lblSize > arrayBuffer.byteLength) throw new Error('LBLSIZE eccede la dimensione del file');
+
+
+
+    return { lblSize, labelText: labelText, labelOffset: offset };
+  }
+
+  // First try preferOffset if given
+  let parsed = null;
+  if (preferOffset && preferOffset >= 0) {
+    try { parsed = tryParseAt(preferOffset); } catch(e){ /* fallthrough */ }
+  }
+
+// if (parsed) {
+//   console.log("parseVicarToJSON:",parseVicarToJSON(result.labelText, result.lblSize));
+// }
+
+    // if not found at preferOffset, try at 0
+  if (!parsed) parsed = tryParseAt(0);
+  // if still not found, try scanning forward a bit (in case label starts slightly off)
+  if (!parsed) {
+    const SCAN_LIMIT = Math.min(65536, arrayBuffer.byteLength);
+    const headBytes = new Uint8Array(arrayBuffer.slice(0, SCAN_LIMIT));
+    const headText = new TextDecoder().decode(headBytes);
+    const m = headText.match(/LBLSIZE\\s*=\\s*(\\d+)/i);
+    if (m) {
+      // compute approximate index of match and try from there
+      const idx = headText.indexOf(m[0]);
+      if (idx >= 0) {
+        parsed = tryParseAt(0); // already tried, but keep safe
+      }
+    }
+  }
+  if (!parsed) throw new Error('LBLSIZE non trovato (né a 0x6800 né all\'inizio)');
+
+  const { lblSize, labelText, labelOffset } = parsed;
+
+console.log("JSON:",parseVicarLabel(parsed.labelText, parsed.lblSize))
+
+  // basic field extractor (handles ' or unquoted values)
+  const getField = (name) => {
+    const re = new RegExp(name + "\\s*=\\s*'?(.*?)'?(\\s|,|$)", "i");
+    const m = labelText.match(re);
+    return m ? m[1].trim() : null;
+  };
+
+  const NL = parseInt(getField('NL') || getField('LINES') || getField('N1') || getField('N2') ,10);
+  const NS = parseInt(getField('NS') || getField('SAMPLES') || getField('N2') || getField('N1'),10);
+  const NB = parseInt(getField('NB') || getField('BANDS') || getField('N3') || '1',10);
+  const FORMAT = (getField('FORMAT') || '').toUpperCase();
+  const ORG = (getField('ORG') || '').toUpperCase() || 'BSQ';
+  const RECSIZE = parseInt(getField('RECSIZE')||getField('BUFSIZ')||'0',10);
+
+  if (!NL || !NS) throw new Error('Dimensioni NL/NS non lette correttamente dalla label');
+
+  const dataOffset = labelOffset + lblSize;
+  const dv = new DataView(arrayBuffer, dataOffset);
+  const totalSamples = NL * NS * NB;
+
+  // prepare canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = NS; canvas.height = NL;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(NS, NL);
+  const out = imgData.data;
+
+  // read values into typed array depending on format (big-endian)
+  let values = new Float64Array(totalSamples); // store as float64 for safe mapping
+  let min = Number.POSITIVE_INFINITY, max = Number.NEGATIVE_INFINITY;
+
+  if (FORMAT === 'HALF'){
+    // signed 16-bit big-endian
+    const bytesNeeded = totalSamples * 2;
+    if (dv.byteLength < bytesNeeded) throw new Error('Dati HALF insufficienti');
+    for (let i=0;i<totalSamples;i++){
+      const byteOffset = i*2;
+      const v = dv.getInt16(byteOffset, false);
+      values[i] = v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  } else if (FORMAT === 'REAL' || FORMAT === 'FLOAT' || FORMAT === 'FLOAT32'){
+    const bytesNeeded = totalSamples * 4;
+    if (dv.byteLength < bytesNeeded) throw new Error('Dati REAL insufficienti');
+    for (let i=0;i<totalSamples;i++){
+      const byteOffset = i*4;
+      const v = dv.getFloat32(byteOffset, false);
+      values[i] = v;
+      if (Number.isFinite(v)){ if (v < min) min = v; if (v > max) max = v; }
+    }
+  } else if (FORMAT === 'BYTE' || FORMAT === 'UBYTE' || FORMAT === 'BYTE_UNSIGNED'){
+    const bytesNeeded = totalSamples;
+    if (dv.byteLength < bytesNeeded) throw new Error('Dati BYTE insufficienti');
+    for (let i=0;i<totalSamples;i++){
+      const v = dv.getUint8(i);
+      values[i] = v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  } else {
+    throw new Error('FORMAT non supportato: ' + FORMAT);
+  }
+
+  if (!isFinite(min) || !isFinite(max)) { min = 0; max = 1; }
+  if (max === min) max = min + 1;
+
+  // BSQ ordering handled: band-major contiguous planes
+  function fillBandToImage(bandIndex){
+    const planeOffset = bandIndex * (NL*NS);
+    for (let r=0;r<NL;r++){
+      for (let c=0;c<NS;c++){
+        const sampleIndex = planeOffset + r*NS + c;
+        const v = values[sampleIndex];
+        const mapped = Math.round((v - min) / (max - min) * 255);
+        const i = (r*NS + c)*4;
+        out[i] = mapped; out[i+1] = mapped; out[i+2] = mapped; out[i+3] = 255;
+      }
+    }
+    ctx.putImageData(imgData,0,0);
+  }
+
+  // initial fill with band 0
+  fillBandToImage(0);
+
+  const meta = {
+    LBLSIZE: lblSize,
+    labelOffset,
+    NL, NS, NB,
+    FORMAT, ORG, RECSIZE,
+    rawLabel: labelText,
+    min, max,
+    values, // full array for band switching
+    fillBandToImage,
+    canvas
+  };
+
+  return { canvas, meta };
+}
+
+/* ---------- Modal display for SGI / VICAR ---------- */
+function showMetaForSGI(name, meta){
+  metaTitle.textContent = name + ' — SGI IRIS';
+  metaFields.innerHTML = `<div><strong>dimensions:</strong> ${meta.xsize} × ${meta.ysize}</div>
+    <div><strong>channels (zsize):</strong> ${meta.zsize}</div>
+    <div><strong>byte/channel (bpc):</strong> ${meta.bpc}</div>
+    <div><strong>storage:</strong> ${meta.storage === 0 ? 'uncompressed' : 'RLE (non supportato)'} (header parsed at offset 0)</div>`;
+  rawLabel.textContent = '';
+  bandChooser.innerHTML = '';
+  floatingMeta.style.display = 'block'; floatingMeta.setAttribute('aria-hidden','false');
+}
+
+function showMetaForVICAR(name, result){
+  const m = result.meta;
+  metaTitle.textContent = name + ' — VICAR/PDS';
+  metaFields.innerHTML = '';
+  const add = (k,v) => metaFields.innerHTML += `<div><strong>${escapeHtml(k)}:</strong> ${escapeHtml(String(v))}</div>`;
+  add('LBLSIZE', m.LBLSIZE);
+  add('labelOffset (dec)', m.labelOffset);
+  add('NL', m.NL); add('NS', m.NS); add('NB', m.NB);
+  add('FORMAT', m.FORMAT); add('ORG', m.ORG); add('RECSIZE', m.RECSIZE);
+  add('min', m.min); add('max', m.max);
+
+  rawLabel.textContent = m.rawLabel || '(label non disponibile)';
+  bandChooser.innerHTML = '';
+  if (m.NB > 1){
+    const info = document.createElement('div');
+    info.textContent = 'Scegli banda da visualizzare:';
+    bandChooser.appendChild(info);
+    for(let b=0;b<m.NB;b++){
+      const btn = document.createElement('button');
+      btn.textContent = 'Banda ' + (b+1);
+      btn.addEventListener('click', ()=> {
+        m.fillBandToImage(b);
+      });
+      bandChooser.appendChild(btn);
+    }
+  } else {
+    bandChooser.innerHTML = '<div class="small">Immagine single-band</div>';
+  }
+
+  floatingMeta.style.display = 'block'; floatingMeta.setAttribute('aria-hidden','false');
+}
+
+function parseVicarToJSON(labelText, lblSize) {
+  const meta = {};
+  const text = labelText.slice(0, lblSize);
+
+  // Alcuni campi VICAR possono contenere parentesi, liste, virgolette ecc.
+  // Questo parser gestisce:
+  //    KEY = VALUE
+  //    KEY = 'VALUE'
+  //    KEY = ("A","B","C")
+  //    KEY = (1,2,3)
+  // mantenendo tipi sensati.
+
+  const lines = text.split(/\r?\n/);
+
+  for (let rawLine of lines) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith("/*")) continue;
+
+    const eqIndex = line.indexOf("=");
+    if (eqIndex === -1) continue;
+
+    const key = line.slice(0, eqIndex).trim().toUpperCase();
+    let value = line.slice(eqIndex + 1).trim();
+
+    // Rimuovi eventuale trailing comma
+    if (value.endsWith(",")) value = value.slice(0, -1).trim();
+
+    // Gestione liste VICAR: ("A","B","C") o (1,2,3)
+    if (value.startsWith("(") && value.endsWith(")")) {
+      const inside = value.slice(1, -1).trim();
+
+      // Split sicuro per valori tra virgolette
+      const items = inside.split(/,(?=(?:[^"]|"[^"]*")*$)/).map(v => v.trim());
+
+      meta[key] = items.map(item => {
+        // Rimuovo virgolette
+        if ((item.startsWith("'") && item.endsWith("'")) ||
+            (item.startsWith('"') && item.endsWith('"'))) {
+          return item.slice(1, -1);
+        }
+        // Conversione numerica se valido
+        const numeric = Number(item);
+        return isNaN(numeric) ? item : numeric;
+      });
+
+      continue;
+    }
+
+    // Rimuovi virgolette singole o doppie
+    if ((value.startsWith("'") && value.endsWith("'")) ||
+        (value.startsWith('"') && value.endsWith('"'))) {
+      meta[key] = value.slice(1, -1);
+      continue;
+    }
+
+    // Tentativo di numerico
+    const numeric = Number(value);
+    meta[key] = isNaN(numeric) ? value : numeric;
+  }
+
+  return meta;
+}
+
+function parseVicarLabel(labelText) {
+  const json = {};
+
+  // prima troviamo LBLSIZE per sapere quanti caratteri leggere
+  const lblMatch = labelText.match(/LBLSIZE\s*=\s*(\d+)/i);
+  const lblSize = lblMatch ? parseInt(lblMatch[1], 10) : labelText.length;
+
+  // prendiamo solo i primi lblSize caratteri
+  const labelContent = labelText.slice(0, lblSize);
+
+  let pos = 0;
+  while (pos < labelContent.length) {
+    const eqIndex = labelContent.indexOf('=', pos);
+    if (eqIndex === -1) break;
+
+    // trova inizio nome: spazio precedente o inizio stringa
+    let nameStart = eqIndex - 1;
+    while (nameStart >= 0 && /\S/.test(labelContent[nameStart])) nameStart--;
+    const name = labelContent.slice(nameStart + 1, eqIndex).trim();
+
+    // trova valore
+    let valueStart = eqIndex + 1;
+    let value;
+    if (labelContent[valueStart] === "'") { // stringa tra apici
+      const end = labelContent.indexOf("'", valueStart + 1);
+      value = labelContent.slice(valueStart + 1, end);
+      pos = end + 1;
+    } else if (labelContent[valueStart] === "(") { // lista tra parentesi
+      let depth = 1;
+      let i = valueStart + 1;
+      while (i < labelContent.length && depth > 0) {
+        if (labelContent[i] === '(') depth++;
+        else if (labelContent[i] === ')') depth--;
+        i++;
+      }
+      const listStr = labelContent.slice(valueStart + 1, i - 1);
+      value = listStr.split(',').map(s => {
+        s = s.trim();
+        if (!isNaN(s)) return Number(s);
+        return s.replace(/^'|'$/g, '');
+      });
+      pos = i;
+    } else { // numero o stringa senza apici
+      let i = valueStart;
+      while (i < labelContent.length && /\S/.test(labelContent[i])) i++;
+      const raw = labelContent.slice(valueStart, i);
+      value = !isNaN(raw) ? Number(raw) : raw;
+      pos = i;
+    }
+
+    json[name] = value;
+  }
+
+  return json;
+}
+
+
+/* ---------- small helper: escape html ---------- */
+function escapeHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+</script>
+</body>
+</html>
