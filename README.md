@@ -14,6 +14,8 @@ Convert .IMG, .RGB/.SGI (*) ancient image formats into modern  PNG
 
 Just load your IMG/RGB/SGI in the browser and "magically" convert it into PNG on any machine.
 
+**Access  it [here](http://jumpjack.github.io/NASA-image-converter/MER-SGI-RGB-viewer.html).**
+
 Images examples:
 
 - [IMG folder](https://planetarydata.jpl.nasa.gov/img/data/mer/spirit/mer2no_0xxx/data/sol1869/rdr/)
